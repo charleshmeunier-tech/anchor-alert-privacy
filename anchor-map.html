@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Anchor Alert — Position</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+  :root {
+    --navy: #1B4965;
+    --navy-dark: #0F2D3D;
+    --gold: #C9A24B;
+    --red: #C0392B;
+    --paper: #F4F1EA;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--paper); }
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+  #header {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
+    background: var(--navy);
+    color: white;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.25);
+  }
+  #header .title { font-weight: 600; font-size: 15px; letter-spacing: 0.3px; }
+  #header .title span { color: var(--gold); }
+  #info-panel {
+    position: absolute;
+    left: 0; right: 0; bottom: 0; z-index: 1000;
+    background: var(--navy-dark);
+    color: white;
+    padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+    font-size: 14px;
+  }
+  #info-panel .row { display: flex; justify-content: space-between; padding: 3px 0; }
+  #info-panel .label { color: #9FB8C9; }
+  #info-panel .value { font-weight: 600; }
+  #info-panel .value.drift { color: var(--red); }
+  #error-box {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    background: white; padding: 20px 24px; border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    color: var(--navy-dark); text-align: center; max-width: 320px; z-index: 2000;
+  }
+  .leaflet-popup-content-wrapper { background: var(--navy); color: white; border-radius: 6px; }
+  .leaflet-popup-tip { background: var(--navy); }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <div class="title">⚓ Anchor <span>Alert</span></div>
+  <div class="title" id="boat-name"></div>
+</div>
+
+<div id="map"></div>
+
+<div id="info-panel" style="display:none;">
+  <div class="row"><span class="label">Distance dérive</span><span class="value drift" id="val-distance">—</span></div>
+  <div class="row"><span class="label">Cap ancre → position</span><span class="value" id="val-bearing">—</span></div>
+  <div class="row"><span class="label">Position ancre</span><span class="value" id="val-anchor">—</span></div>
+  <div class="row"><span class="label">Position actuelle</span><span class="value" id="val-current">—</span></div>
+</div>
+
+<script>
+function getParams() {
+  const p = new URLSearchParams(window.location.search);
+  const parseLatLon = (str) => {
+    if (!str) return null;
+    const parts = str.split(',').map(v => parseFloat(v.trim()));
+    if (parts.length !== 2 || parts.some(isNaN)) return null;
+    return { lat: parts[0], lon: parts[1] };
+  };
+  return {
+    anchor: parseLatLon(p.get('anchor')),
+    current: parseLatLon(p.get('current')),
+    boat: p.get('boat') || ''
+  };
+}
+
+function toRad(deg) { return deg * Math.PI / 180; }
+function toDeg(rad) { return rad * 180 / Math.PI; }
+
+// Haversine distance in meters
+function distanceMeters(a, b) {
+  const R = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h = Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1-h));
+}
+
+// Initial bearing in degrees (0-360)
+function bearingDeg(a, b) {
+  const lat1 = toRad(a.lat), lat2 = toRad(b.lat);
+  const dLon = toRad(b.lon - a.lon);
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+  let brng = toDeg(Math.atan2(y, x));
+  return (brng + 360) % 360;
+}
+
+function formatLatLon(pt) {
+  const latDeg = Math.abs(pt.lat).toFixed(5);
+  const lonDeg = Math.abs(pt.lon).toFixed(5);
+  return `${latDeg}°${pt.lat >= 0 ? 'N' : 'S'} ${lonDeg}°${pt.lon >= 0 ? 'E' : 'W'}`;
+}
+
+function showError(msg) {
+  document.getElementById('map').style.display = 'none';
+  const box = document.createElement('div');
+  box.id = 'error-box';
+  box.innerHTML = `<strong>Position indisponible</strong><br><br>${msg}`;
+  document.body.appendChild(box);
+}
+
+const { anchor, current, boat } = getParams();
+
+if (!anchor || !current) {
+  showError('Le lien reçu ne contient pas de coordonnées valides.');
+} else {
+  document.getElementById('boat-name').textContent = boat;
+
+  const map = L.map('map', { zoomControl: true }).setView(
+    [(anchor.lat + current.lat) / 2, (anchor.lon + current.lon) / 2],
+    16
+  );
+
+  // OpenSeaMap over OpenStreetMap base, matching the app's rendering
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+
+  L.tileLayer('https://tiles.openseamap.org/seamark/{z}/{x}/{y}.png', {
+    attribution: '© OpenSeaMap contributors',
+    maxZoom: 19
+  }).addTo(map);
+
+  const navyIcon = L.divIcon({
+    className: '',
+    html: `<div style="width:18px;height:18px;border-radius:50%;background:#1B4965;border:3px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9]
+  });
+
+  const redIcon = L.divIcon({
+    className: '',
+    html: `<div style="width:18px;height:18px;border-radius:50%;background:#C0392B;border:3px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.4);"></div>`,
+    iconSize: [18, 18],
+    iconAnchor: [9, 9]
+  });
+
+  L.marker([anchor.lat, anchor.lon], { icon: navyIcon })
+    .addTo(map)
+    .bindPopup('⚓ Position ancre');
+
+  L.marker([current.lat, current.lon], { icon: redIcon })
+    .addTo(map)
+    .bindPopup('📍 Position actuelle');
+
+  L.polyline(
+    [[anchor.lat, anchor.lon], [current.lat, current.lon]],
+    { color: '#C0392B', weight: 3, dashArray: '6,6' }
+  ).addTo(map);
+
+  const bounds = L.latLngBounds([[anchor.lat, anchor.lon], [current.lat, current.lon]]);
+  map.fitBounds(bounds, { padding: [60, 60] });
+
+  const dist = distanceMeters(anchor, current);
+  const brg = bearingDeg(anchor, current);
+
+  document.getElementById('info-panel').style.display = 'block';
+  document.getElementById('val-distance').textContent = `${dist.toFixed(0)} m`;
+  document.getElementById('val-bearing').textContent = `${brg.toFixed(0)}°`;
+  document.getElementById('val-anchor').textContent = formatLatLon(anchor);
+  document.getElementById('val-current').textContent = formatLatLon(current);
+}
+</script>
+
+</body>
+</html>
